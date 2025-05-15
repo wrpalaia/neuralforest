@@ -1,170 +1,167 @@
 import tensorflow as tf
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.datasets import make_classification
-from nforest_model import NeuralForest # Import your model
-import os # Import os for path manipulation
+from sklearn.datasets import make_classification, make_regression # Added make_regression
+from tensorflow import keras # For keras.utils.to_categorical
+import os
+
+# Import from the installed or local package
+from neural_forest.model import NeuralForest
+# from neural_forest import __version__ # Example of importing version
+
+# print(f"Using Neural Forest version: {__version__}") # Optional
 
 # Set random seed for reproducibility
-np.random.seed(42)
-tf.random.set_seed(42)
+GLOBAL_SEED = 42
+np.random.seed(GLOBAL_SEED)
+tf.random.set_seed(GLOBAL_SEED)
 
 # --- Configuration ---
-# Use a dictionary for configuration
 config = {
-    # Model Versioning
-    'model_version': '1.0.0', # <-- Add a semantic version here
+    'model_artifact_version': '1.0.0', # Version for the saved model artifact
 
-    # Common Tree Parameters
-    'tree_depth': 3,
-    'leaf_nn_hidden_layers': [8],
-    'leaf_nn_activation': 'relu',
-    'leaf_nn_output_activation': 'sigmoid', # 'sigmoid', 'softmax', or 'linear'
+    # Tree Parameters
+    'tree_depth': 3, # Depth of each tree
+    'leaf_nn_hidden_layers': [16, 8], # Hidden layers for leaf networks
+    'leaf_nn_activation': 'relu', # Activation for hidden layers in leaf NNs
+    # 'leaf_nn_output_activation': 'sigmoid', # 'sigmoid'(binary), 'softmax'(multi-class), 'linear'(regression)
+    'leaf_nn_output_activation': 'linear', # CHANGED FOR REGRESSION EXAMPLE
 
     # Forest Parameters
-    'num_trees_in_forest': 10,
-    'epochs_per_tree': 20,
-    'batch_size': 64,
+    'num_trees_in_forest': 5, # Number of trees in the forest
+    'epochs_per_tree': 15, # Epochs to train each tree
+    'batch_size_per_tree': 32, # Batch size for training each tree
 
-    # Training Parameters
-    'validation_split_per_tree': 0.1,
-    'early_stopping_patience': 5,
-    'forest_verbose': 1, # 1 for progress, 0 for silent
-    'tree_training_verbose': 0, # Keras verbosity (0 for silent, 1 for progress bar)
+    # Training Control
+    'validation_split_per_tree': 0.15,
+    'early_stopping_patience': 3, # Set to 0 to disable early stopping
+    'random_state_for_bagging': GLOBAL_SEED, # Base seed for bagging in forest.fit
 
-    # Base Model Saving Directory (Version will be added to this)
-    'base_model_save_dir': './saved_neural_forest' # <-- Change to a base directory
+    # Verbosity
+    'forest_verbose': 1, # 0 for silent, 1 for progress
+    'tree_training_verbose': 0, # Keras verbosity (0=silent, 1=progress bar, 2=one line per epoch)
+
+    # Saving
+    'base_model_save_dir': './saved_neural_forest_models', # Base directory for saved models
+    'task_type': 'regression' # 'classification' or 'regression' - for data generation
 }
 
-# Construct the versioned model save path
-# Example: ./saved_neural_forest/1.0.0
+# Construct the versioned model save path for this specific trained artifact
 versioned_model_save_path = os.path.join(
     config['base_model_save_dir'],
-    config['model_version']
+    f"forest_v{config['model_artifact_version']}_{config['leaf_nn_output_activation']}"
 )
-config['model_save_path'] = versioned_model_save_path # Update config with the full path
+config['model_save_path'] = versioned_model_save_path
 
 
-# --- Data Generation (Example - Replace with your data loading) ---
+# --- Data Generation ---
 print("--- Generating Example Data ---")
-# Adjust n_classes based on leaf_nn_output_activation if needed
-n_classes = 2
-if config['leaf_nn_output_activation'] == 'softmax':
-    n_classes = 3 # Example for multi-class
-    output_dim = n_classes
-elif config['leaf_nn_output_activation'] == 'sigmoid':
-     output_dim = 1
-elif config['leaf_nn_output_activation'] == 'linear':
-     # For regression, make_classification generates integer classes,
-     # you might want a different data source or transform y.
-     # For demonstration, we'll treat it as a binary classification dataset initially.
-     # If you intended regression, replace make_classification with a regression dataset generator.
-     print("Warning: Using make_classification for linear output. Consider a regression dataset.")
-     output_dim = 1
+n_samples = 1000
+n_features = 15
+input_dim = n_features # Will be set from X.shape[1] later
 
+if config['task_type'] == 'classification':
+    n_classes_data = 2
+    if config['leaf_nn_output_activation'] == 'softmax':
+        n_classes_data = 3 # Example for multi-class
+    X, y_original = make_classification(
+        n_samples=n_samples, n_features=n_features, n_informative=10,
+        n_redundant=2, n_classes=n_classes_data, random_state=GLOBAL_SEED
+    )
+    if config['leaf_nn_output_activation'] == 'sigmoid':
+        y = y_original.reshape(-1, 1).astype(np.float32)
+        leaf_nn_output_dim = 1
+    elif config['leaf_nn_output_activation'] == 'softmax':
+        y = keras.utils.to_categorical(y_original, num_classes=n_classes_data).astype(np.float32)
+        leaf_nn_output_dim = n_classes_data
+    else: # linear for classification (not typical)
+        print("Warning: Linear output for classification task type. Treating as regression for y-prep.")
+        y = y_original.astype(np.float32).reshape(-1, 1)
+        leaf_nn_output_dim = 1
 
-X, y_original = make_classification(n_samples=2000, n_features=20, n_informative=15, n_redundant=5, n_classes=n_classes, random_state=42)
-input_dim = X.shape[1]
-
-# Prepare y based on the task
-if config['leaf_nn_output_activation'] == 'sigmoid': # Binary classification
-    y = y_original.reshape(-1, 1)
-elif config['leaf_nn_output_activation'] == 'softmax': # Multi-class
-    y = keras.utils.to_categorical(y_original, num_classes=n_classes)
-    # Ensure leaf_nn_config['output_dim'] matches number of classes
-    # This override happens outside the config dict for clarity before passing
-    leaf_nn_output_dim = n_classes
-elif config['leaf_nn_output_activation'] == 'linear': # Regression
-    # If using make_classification for linear, y is 0 or 1.
-    # You'd typically load or generate continuous y values for regression.
-    y = y_original.astype(np.float32).reshape(-1, 1) # Convert to float for regression
+elif config['task_type'] == 'regression':
+    if config['leaf_nn_output_activation'] != 'linear':
+        print(f"Warning: Task type is regression, but output activation is {config['leaf_nn_output_activation']}. Consider 'linear'.")
+    X, y_original = make_regression(
+        n_samples=n_samples, n_features=n_features, n_informative=10,
+        noise=0.5, random_state=GLOBAL_SEED
+    )
+    y = y_original.astype(np.float32).reshape(-1, 1)
     leaf_nn_output_dim = 1
 else:
-     raise ValueError(f"Unsupported leaf_nn_output_activation: {config['leaf_nn_output_activation']}")
+    raise ValueError(f"Unsupported task_type: {config['task_type']}")
 
-# Determine leaf network output dimension based on task
-if config['leaf_nn_output_activation'] in ['sigmoid', 'linear']:
-    leaf_nn_output_dim = 1
-elif config['leaf_nn_output_activation'] == 'softmax':
-    leaf_nn_output_dim = y.shape[1] # Number of columns in one-hot encoded y
+input_dim = X.shape[1] # Correctly set input_dim from data
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+print(f"Data generated: X shape {X.shape}, y shape {y.shape}")
+print(f"Output activation: {config['leaf_nn_output_activation']}, Leaf NN output_dim: {leaf_nn_output_dim}")
 
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=GLOBAL_SEED)
 
-# Define parameters for each tree's leaf networks based on config and data
+# Define parameters for each tree's leaf networks
 leaf_nn_parameters_config = {
     'hidden_layers': config['leaf_nn_hidden_layers'],
     'activation': config['leaf_nn_activation'],
-    'output_dim': leaf_nn_output_dim, # Use calculated output_dim
+    'output_dim': leaf_nn_output_dim,
     'output_activation': config['leaf_nn_output_activation']
 }
 
 # --- Create and Train the Neural Forest ---
 print("\n--- Neural Forest Initialization ---")
-neural_forest = NeuralForest(
+neural_forest_model = NeuralForest(
     num_trees=config['num_trees_in_forest'],
-    tree_depth_val=config['tree_depth'],
-    input_dim=input_dim, # Input dimension from your data
+    tree_depth=config['tree_depth'],
+    input_dim=input_dim,
     leaf_nn_config=leaf_nn_parameters_config
 )
 
 print("\n--- Neural Forest Training ---")
-neural_forest.fit(
+neural_forest_model.fit(
     X_train,
     y_train,
     epochs=config['epochs_per_tree'],
-    tree_batch_size=config['batch_size'],
+    batch_size_per_tree=config['batch_size_per_tree'],
     validation_split_per_tree=config['validation_split_per_tree'],
     early_stopping_patience=config['early_stopping_patience'],
     forest_verbose=config['forest_verbose'],
-    tree_training_verbose=config['tree_training_verbose']
+    tree_training_verbose=config['tree_training_verbose'],
+    random_state_base=config['random_state_for_bagging']
 )
 
 # --- Save the Trained Forest ---
 print(f"\n--- Saving Neural Forest to {config['model_save_path']} ---")
-# Ensure the versioned directory exists before saving
-os.makedirs(config['model_save_path'], exist_ok=True) # <-- Create the versioned directory
-neural_forest.save(config['model_save_path'])
+os.makedirs(config['model_save_path'], exist_ok=True)
+neural_forest_model.save(config['model_save_path'])
 
 print("\nTraining and saving complete.")
 
-# Optional: Evaluate on test set after training (for verification)
-from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error, r2_score
-
+# --- Optional: Evaluate on Test Set ---
 print("\n--- Evaluation on Test Set ---")
-y_pred_proba_forest = neural_forest.predict_proba(X_test)
+# For classification, predict_proba gives probabilities, predict gives labels
+# For regression, predict_proba (and predict) gives the predicted values
+y_pred_values_or_proba = neural_forest_model.predict_proba(X_test)
 
-if config['leaf_nn_output_activation'] == 'sigmoid': # Binary classification
-    y_pred_labels_forest = (y_pred_proba_forest > 0.5).astype(int)
-    accuracy = accuracy_score(y_test, y_pred_labels_forest)
-    try:
-        # Ensure y_test is the correct shape for roc_auc_score if it's not already
-        if y_test.ndim > 1 and y_test.shape[1] == 1:
-             y_test_roc_auc = y_test.flatten()
-        else:
-             y_test_roc_auc = y_test # Assume it's already 1D for binary
-
-        # Ensure y_pred_proba_forest is also 1D for binary ROC AUC
-        if y_pred_proba_forest.ndim > 1 and y_pred_proba_forest.shape[1] == 1:
-            y_pred_proba_forest_roc_auc = y_pred_proba_forest.flatten()
-        else:
-            y_pred_proba_forest_roc_auc = y_pred_proba_forest # Assume it's already 1D
-
-        roc_auc = roc_auc_score(y_test_roc_auc, y_pred_proba_forest_roc_auc)
-        print(f"Forest Test Accuracy: {accuracy:.4f}")
-        print(f"Forest Test ROC AUC: {roc_auc:.4f}")
-    except ValueError as e:
-        print(f"Forest Test Accuracy: {accuracy:.4f}")
-        print(f"Could not calculate ROC AUC: {e}")
-
-elif config['leaf_nn_output_activation'] == 'softmax': # Multi-class classification
-    y_pred_labels_forest = np.argmax(y_pred_proba_forest, axis=1)
-    y_test_labels = np.argmax(y_test, axis=1) # Assuming y_test is one-hot encoded
-    accuracy = accuracy_score(y_test_labels, y_pred_labels_forest)
+if config['leaf_nn_output_activation'] == 'sigmoid':
+    from sklearn.metrics import accuracy_score, roc_auc_score
+    y_pred_labels = (y_pred_values_or_proba > 0.5).astype(int)
+    accuracy = accuracy_score(y_test, y_pred_labels)
+    roc_auc = roc_auc_score(y_test, y_pred_values_or_proba) # Use probabilities for AUC
     print(f"Forest Test Accuracy: {accuracy:.4f}")
+    print(f"Forest Test ROC AUC: {roc_auc:.4f}")
+
+elif config['leaf_nn_output_activation'] == 'softmax':
+    from sklearn.metrics import accuracy_score # roc_auc_score needs careful setup for multi-class
+    y_pred_labels = np.argmax(y_pred_values_or_proba, axis=1)
+    y_test_labels = np.argmax(y_test, axis=1) # Assuming y_test is one-hot
+    accuracy = accuracy_score(y_test_labels, y_pred_labels)
+    print(f"Forest Test Accuracy: {accuracy:.4f}")
+    # For multi-class AUC, consider metrics like One-vs-Rest or One-vs-One if needed
 
 elif config['leaf_nn_output_activation'] == 'linear': # Regression
-    mse = mean_squared_error(y_test, y_pred_proba_forest)
-    r2 = r2_score(y_test, y_pred_proba_forest)
-    print(f"Forest Test Mean Squared Error: {mse:.4f}")
-    print(f"Forest Test R-squared: {r2:.4f}")
+    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+    mse = mean_squared_error(y_test, y_pred_values_or_proba)
+    mae = mean_absolute_error(y_test, y_pred_values_or_proba)
+    r2 = r2_score(y_test, y_pred_values_or_proba)
+    print(f"Forest Test Mean Squared Error (MSE): {mse:.4f}")
+    print(f"Forest Test Mean Absolute Error (MAE): {mae:.4f}")
+    print(f"Forest Test R-squared (R2): {r2:.4f}")
